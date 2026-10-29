@@ -33,19 +33,27 @@ module Watchtower
   class Config
     attr_reader :service, :endpoint, :redactor, :resource
 
-    def initialize(service:, endpoint: nil, key: nil, resource: {}, redactor: nil)
+    def initialize(service:, endpoint: nil, key: nil, resource: {}, redactor: nil,
+                   environment: nil, release: nil)
       @service = service
       @endpoint = (endpoint || DEFAULT_ENDPOINT).sub(%r{/+\z}, '')
       @key = key
-      @resource = resource
+      @resource = resource.dup
+      @resource['deployment.environment'] ||= environment if environment
+      @resource['service.version'] ||= release if release
       @redactor = redactor
     end
 
-    def self.from_env(service:, **opts)
-      endpoint = ENV['WT_ENDPOINT']
-      key = ENV['WT_INGEST_KEY']
-      new(service: service, endpoint: endpoint.to_s.empty? ? nil : endpoint,
-          key: key.to_s.empty? ? nil : key, **opts)
+    def self.env(name)
+      v = ENV.fetch(name, '')
+      v.empty? ? nil : v
+    end
+
+    # WT_ENDPOINT is the deprecated alias of WT_OTLP_ENDPOINT.
+    def self.from_env(service: nil, **opts)
+      new(service: service || env('WT_SERVICE') || 'unknown_service',
+          endpoint: env('WT_OTLP_ENDPOINT') || env('WT_ENDPOINT'), key: env('WT_INGEST_KEY'),
+          environment: env('WT_ENVIRONMENT'), release: env('WT_RELEASE'), **opts)
     end
 
     def headers
@@ -108,17 +116,31 @@ module Watchtower
   end
 
   # Configures the global OpenTelemetry SDK. Returns the Config.
-  def self.init(config)
+  # instrument: true also enables the OTel Ruby instrumentations (Rack, Rails, Sidekiq, ...) when
+  # the opentelemetry-instrumentation-all gem is installed.
+  def self.init(config, instrument: true)
     require 'opentelemetry/sdk'
     require 'opentelemetry/exporter/otlp'
+    use_all = instrument && begin
+      require 'opentelemetry/instrumentation/all'
+      true
+    rescue LoadError
+      false
+    end
+    @redactor = config.redactor
     inner = OpenTelemetry::Exporter::OTLP::Exporter.new(
       endpoint: "#{config.endpoint}/v1/traces", headers: config.headers
     )
     exporter = Exporter.new(inner, config.redactor, OfflineBuffer.new)
     OpenTelemetry::SDK.configure do |c|
+      c.use_all if use_all
       c.resource = OpenTelemetry::SDK::Resources::Resource.create(config.resource_attributes)
       c.add_span_processor(OpenTelemetry::SDK::Trace::Export::BatchSpanProcessor.new(exporter))
     end
     config
   end
+
+  def self.redactor = @redactor
 end
+
+%w[capture rack sidekiq log_bridge rails].each { |f| require_relative "watchtower/#{f}" }

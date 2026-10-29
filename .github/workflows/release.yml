@@ -20,7 +20,7 @@ jobs:
           bundler-cache: true
       - run: bundle exec rake test
       - run: gem build watchtower.gemspec
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: '*.gem'
       - name: GitHub release

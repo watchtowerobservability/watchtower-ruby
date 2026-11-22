@@ -98,3 +98,41 @@ class IntegrationsTest < Minitest::Test
     %w[WT_ENDPOINT WT_OTLP_ENDPOINT WT_ENVIRONMENT WT_RELEASE WT_SERVICE].each { |k| ENV.delete(k) }
   end
 end
+
+class PayloadTest < Minitest::Test
+  def setup
+    EXPORTER.reset
+  end
+
+  def teardown
+    Watchtower::Payload.rules = []
+  end
+
+  def test_rack_records_capped_redacted_bodies_per_route
+    Watchtower::Payload.rules = [{ 'route' => '/api/*', 'body_bytes' => 40 }]
+    app = ->(_env) { [200, { 'content-type' => 'image/png' }, ['png']] }
+    body = '{"user":"a@b.io","password":"hunter2","card":"4111 1111 1111 1111"}'
+    env = { 'PATH_INFO' => '/api/login', 'CONTENT_TYPE' => 'application/json', 'rack.input' => StringIO.new(body) }
+    OpenTelemetry.tracer_provider.tracer('t').in_span('req') { Watchtower::RackMiddleware.new(app).call(env) }
+    got = EXPORTER.finished_spans.last.attributes
+    assert got['http.request.body'].bytesize <= 40
+    refute_includes got['http.request.body'], 'hunter2'
+    refute_includes got['http.request.body'], 'a@b.io'
+    refute got.key?('http.response.body')
+    assert_equal body, env['rack.input'].read # rewound for the app
+    assert_equal '4111 1111 1111 1112', Watchtower::Payload.redact('4111 1111 1111 1112')
+  end
+
+  def test_graphql_operation_and_document
+    Watchtower::Payload.rules = [{ 'graphql_query' => true }]
+    span = OpenTelemetry.tracer_provider.tracer('t').start_span('gql')
+    q = JSON.generate('query' => "# c\nmutation AddUser { add(email: \"x@y.io\") { id } }")
+    Watchtower::Payload.record(span, '/graphql', 'application/json', q, nil, nil)
+    span.finish
+    got = EXPORTER.finished_spans.last.attributes
+    assert_equal 'mutation', got['graphql.operation.type']
+    assert_equal 'AddUser', got['graphql.operation.name']
+    refute_includes got['graphql.document'], 'x@y.io'
+    assert_nil Watchtower::Payload.graphql_op('shoes')
+  end
+end

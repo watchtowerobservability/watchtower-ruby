@@ -5,8 +5,8 @@
 module Watchtower
   DEFAULT_ENDPOINT = 'http://localhost:4318'
 
-  # Bounded buffer; drops the oldest item when full.
-  # shortcut: in memory only, a process restart loses it; upgrade to a file spool.
+  # Bounded in-memory buffer; drops the oldest item when full. Set `spool_dir:` (WT_SPOOL_DIR) for
+  # the file spool (Watchtower::FileSpool) that survives a restart.
   class OfflineBuffer
     def initialize(max = 64)
       @max = [max, 1].max
@@ -31,11 +31,17 @@ module Watchtower
   end
 
   class Config
-    attr_reader :service, :endpoint, :redactor, :resource
+    attr_reader :service, :endpoint, :redactor, :resource, :spool_dir, :logs, :metrics
+
+    # Ingest key for the capture rules fetch (APM-016); never logged (see inspect).
+    def key = @key
 
     def initialize(service:, endpoint: nil, key: nil, resource: {}, redactor: nil,
-                   environment: nil, release: nil)
+                   environment: nil, release: nil, spool_dir: nil, logs: nil, metrics: nil)
       @service = service
+      @spool_dir = spool_dir
+      @logs = logs # nil: WATCHTOWER_LOGS
+      @metrics = metrics # nil: WATCHTOWER_METRICS
       @endpoint = (endpoint || DEFAULT_ENDPOINT).sub(%r{/+\z}, '')
       @key = key
       @resource = resource.dup
@@ -53,7 +59,8 @@ module Watchtower
     def self.from_env(service: nil, **opts)
       new(service: service || env('WT_SERVICE') || 'unknown_service',
           endpoint: env('WT_OTLP_ENDPOINT') || env('WT_ENDPOINT'), key: env('WT_INGEST_KEY'),
-          environment: env('WT_ENVIRONMENT'), release: env('WT_RELEASE'), **opts)
+          environment: env('WT_ENVIRONMENT'), release: env('WT_RELEASE'), spool_dir: env('WT_SPOOL_DIR'),
+          **opts)
     end
 
     def headers
@@ -100,6 +107,7 @@ module Watchtower
       span_datas.each do |s|
         s.attributes = Watchtower.redact(s.attributes || {}, @hook) if s.respond_to?(:attributes=)
       end
+      @buffer.replay if @buffer.respond_to?(:replay)
       pending = @buffer.drain
       result = OpenTelemetry::SDK::Trace::Export::SUCCESS
       (pending + [span_datas]).each do |batch|
@@ -131,16 +139,32 @@ module Watchtower
     inner = OpenTelemetry::Exporter::OTLP::Exporter.new(
       endpoint: "#{config.endpoint}/v1/traces", headers: config.headers
     )
-    exporter = Exporter.new(inner, config.redactor, OfflineBuffer.new)
+    buffer = if config.spool_dir
+               FileSpool.new(config.spool_dir, url: "#{config.endpoint}/v1/traces", headers: config.headers)
+             else
+               OfflineBuffer.new
+             end
+    exporter = Exporter.new(inner, config.redactor, buffer)
+    resource = OpenTelemetry::SDK::Resources::Resource.create(config.resource_attributes)
     OpenTelemetry::SDK.configure do |c|
       c.use_all if use_all
-      c.resource = OpenTelemetry::SDK::Resources::Resource.create(config.resource_attributes)
+      c.resource = resource
       c.add_span_processor(OpenTelemetry::SDK::Trace::Export::BatchSpanProcessor.new(exporter))
+    end
+    # after configure: the logs and metrics SDKs patch it to build env-only exporters without the key
+    @logs = Signals.on?(config.logs, 'WATCHTOWER_LOGS', 'OTEL_LOGS_EXPORTER')
+    Signals.start_logs(config, resource) if @logs
+    Signals.start_metrics(config, resource) if Signals.on?(config.metrics, 'WATCHTOWER_METRICS', 'OTEL_METRICS_EXPORTER')
+    if config.key && ENV['WT_CAPTURE_RULES'] == '1'
+      Thread.new { Payload.load(Config.env('WT_API_URL') || config.endpoint, config.key, config.service) }
     end
     config
   end
 
   def self.redactor = @redactor
+
+  # True once init turned the OTLP logs signal on; LogBridge then emits log records.
+  def self.logs? = @logs == true
 end
 
-%w[capture rack sidekiq log_bridge rails].each { |f| require_relative "watchtower/#{f}" }
+%w[spool signals capture payload rack appsec sidekiq log_bridge rails].each { |f| require_relative "watchtower/#{f}" }

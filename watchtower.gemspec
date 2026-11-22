@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name = 'watchtower-sdk'
-  s.version = '0.1.0'
+  s.version = '0.1.1'
   s.summary = 'Thin Watchtower distribution over the OpenTelemetry Ruby SDK'
   s.authors = ['Watchtower']
   s.license = 'Apache-2.0'
@@ -10,6 +10,12 @@ Gem::Specification.new do |s|
   s.required_ruby_version = '>= 3.1'
   s.add_dependency 'opentelemetry-sdk', '~> 1.5'
   s.add_dependency 'opentelemetry-exporter-otlp', '~> 0.29'
+  s.add_dependency 'opentelemetry-logs-sdk', '~> 0.1'
+  s.add_dependency 'opentelemetry-exporter-otlp-logs', '~> 0.1'
+  s.add_dependency 'opentelemetry-metrics-sdk', '~> 0.2'
+  s.add_dependency 'opentelemetry-exporter-otlp-metrics', '~> 0.1'
+  s.add_dependency 'digest-xxhash', '~> 0.2' # MIT; XXH3 for the shared SQL statement hash
+  s.add_development_dependency 'sqlite3', '>= 1.6'
   s.add_development_dependency 'minitest', '~> 5.20'
   s.add_development_dependency 'rake', '~> 13.0'
 end

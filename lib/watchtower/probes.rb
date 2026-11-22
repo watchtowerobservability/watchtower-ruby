@@ -344,12 +344,14 @@ module Watchtower
         rescue StandardError
           span = nil # the app must never fail because of a probe
         end
+        Thread.current[:wt_probe_err] = nil
         (Thread.current[:wt_probe_spans] ||= []) << [tp.method_id, span, token]
       end
 
-      # shortcut: an exceptional exit is read from `$!` at `:return` (a probed call made inside a
-      # caller's rescue clause reads as failed), and a probe set replaced while a probed call runs
-      # leaves that span open; upgrade with Ruby's `:rescue` event when 3.3 is the floor.
+      # shortcut: `$!` is nil inside a TracePoint hook, so an exceptional exit is the last exception seen
+      # by the `:raise` event (one raised and rescued inside the probed method reads as failed), and a probe
+      # set replaced while a probed call runs leaves that span open; upgrade with Ruby's `:rescue` event
+      # when 3.3 is the floor.
       def span_close(tp, err)
         stack = Thread.current[:wt_probe_spans]
         return unless stack&.last&.first == tp.method_id
@@ -382,11 +384,13 @@ module Watchtower
                      .select { |p| p.line.positive? && !p.file.empty? }.group_by(&:line)
         events = []
         events << :call unless funcs.empty?
-        events << :return unless spans.empty?
+        events << :return << :raise unless spans.empty?
         events << :line unless lines.empty?
         @tp = TracePoint.new(*events) do |tp|
           owner = tp.defined_class&.name.to_s
-          if tp.event == :call
+          if tp.event == :raise
+            Thread.current[:wt_probe_err] = tp.raised_exception
+          elsif tp.event == :call
             (funcs[tp.method_id] || []).each do |p|
               next unless p.klass.empty? || owner == p.klass
 
@@ -394,7 +398,9 @@ module Watchtower
             end
           elsif tp.event == :return
             n = (spans[tp.method_id] || []).count { |p| p.klass.empty? || owner == p.klass }
-            n.times { span_close(tp, $!) }
+            err = Thread.current[:wt_probe_err]
+            Thread.current[:wt_probe_err] = nil
+            n.times { span_close(tp, err) }
           else
             (lines[tp.lineno] || []).each { |p| hit(p, tp) if tp.path.end_with?(p.file) }
           end

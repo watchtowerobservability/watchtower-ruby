@@ -35,8 +35,12 @@ class SQLite3IntegrationTest < Minitest::Test
     end
     require_relative '../lib/watchtower/sqlite3'
     @exporter = OpenTelemetry::SDK::Trace::Export::InMemorySpanExporter.new
-    OpenTelemetry::SDK.configure do |c|
-      c.add_span_processor(OpenTelemetry::SDK::Trace::Export::SimpleSpanProcessor.new(@exporter))
+    # Add to the shared provider: re-configuring the SDK would detach the other test files' exporters.
+    proc = OpenTelemetry::SDK::Trace::Export::SimpleSpanProcessor.new(@exporter)
+    if OpenTelemetry.tracer_provider.is_a?(OpenTelemetry::SDK::Trace::TracerProvider)
+      OpenTelemetry.tracer_provider.add_span_processor(proc)
+    else
+      OpenTelemetry::SDK.configure { |c| c.add_span_processor(proc) }
     end
     Watchtower::SQLite3.instrument
   end
